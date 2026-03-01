@@ -247,6 +247,102 @@ export async function headFile(filePath, numLines) {
   }
 }
 
+export async function readLines(filePath, start, end) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const total = lines.length;
+  const from = Math.max(1, start);
+  const to = end !== undefined ? Math.min(end, total) : total;
+  const selected = lines.slice(from - 1, to);
+  return { lines: selected, from, to, total };
+}
+
+export async function findInFile(filePath, searchText, options = {}) {
+  const { caseSensitive = false, context = 0 } = options;
+  const content = await fs.readFile(filePath, 'utf-8').catch(() => null);
+  if (!content) throw new Error(`Could not read file: ${filePath}`);
+  const needle = caseSensitive ? searchText : searchText.toLowerCase();
+  const lines = normalizeLineEndings(content).split('\n');
+  const results = [];
+  lines.forEach((line, i) => {
+    const haystack = caseSensitive ? line : line.toLowerCase();
+    if (haystack.includes(needle)) {
+      if (context > 0) {
+        const from = Math.max(0, i - context);
+        const to = Math.min(lines.length - 1, i + context);
+        const contextLines = lines.slice(from, to + 1).map((l, j) => ({
+          line: from + j + 1,
+          text: l.trim(),
+          isMatch: from + j === i
+        }));
+        results.push({ matchLine: i + 1, contextLines });
+      } else {
+        results.push({ line: i + 1, text: line.trim() });
+      }
+    }
+  });
+  return results;
+}
+
+export async function fileStats(filePath) {
+  const stats = await fs.stat(filePath);
+  const content = await fs.readFile(filePath, 'utf-8').catch(() => null);
+  const lineCount = content ? normalizeLineEndings(content).split('\n').length : null;
+  const preview = content ? normalizeLineEndings(content).split('\n').slice(0, 5).join('\n') : null;
+  return {
+    size: stats.size,
+    lineCount,
+    modified: stats.mtime,
+    preview
+  };
+}
+
+export async function replaceLines(filePath, start, end, newContent) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const total = lines.length;
+  const from = Math.max(1, start) - 1;
+  const to = Math.min(end, total);
+  const newLines = normalizeLineEndings(newContent).split('\n');
+  lines.splice(from, to - from, ...newLines);
+  const result = lines.join('\n');
+  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, result, 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { replacedLines: to - from, newLines: newLines.length, total: lines.length };
+}
+
+export async function insertLines(filePath, afterLine, newContent) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const newLines = normalizeLineEndings(newContent).split('\n');
+  const insertAt = Math.min(afterLine, lines.length);
+  lines.splice(insertAt, 0, ...newLines);
+  const result = lines.join('\n');
+  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, result, 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { insertedAt: insertAt, insertedLines: newLines.length, total: lines.length };
+}
+
+export async function deleteLines(filePath, start, end) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const total = lines.length;
+  const from = Math.max(1, start) - 1;
+  const to = Math.min(end, total);
+  lines.splice(from, to - from);
+  const result = lines.join('\n');
+  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, result, 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { deletedLines: to - from, total: lines.length };
+}
+
+export async function appendToFile(filePath, content) {
+  await fs.appendFile(filePath, content, 'utf-8');
+}
+
 export async function deleteFile(filePath) {
   const stats = await fs.stat(filePath);
   if (stats.isDirectory()) throw new Error(`Path is a directory, not a file: ${filePath}`);

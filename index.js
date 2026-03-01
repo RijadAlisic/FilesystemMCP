@@ -24,6 +24,13 @@ import {
   deleteFile,
   copyFile,
   findInFiles,
+  readLines,
+  findInFile,
+  fileStats,
+  replaceLines,
+  insertLines,
+  deleteLines,
+  appendToFile,
 } from './lib.js';
 
 // Command line argument parsing
@@ -311,6 +318,139 @@ server.registerTool("get_file_info", {
   const validPath = await validatePath(args.path);
   const info = await getFileStats(validPath);
   const text = Object.entries(info).map(([key, value]) => `${key}: ${value}`).join("\n");
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("read_lines", {
+  title: "Read Lines",
+  description: "Read a specific range of lines from a file by line number. Use find_in_file first to locate keywords and get their line numbers, then use this to read just the relevant section. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    start: z.number().int().min(1).describe("First line to read (1-indexed)"),
+    end: z.number().int().optional().describe("Last line to read (inclusive). Omit to read to end of file.")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const { lines, from, to, total } = await readLines(validPath, args.start, args.end);
+  const numbered = lines.map((line, i) => `${from + i}: ${line}`).join('\n');
+  const text = `Lines ${from}-${to} of ${total}:\n${numbered}`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("find_in_file", {
+  title: "Find in File",
+  description: "Search for a keyword or phrase within a single file and return all matching line numbers and text. Use this before read_lines or edit_file to locate exactly where something is without reading the whole file. Optionally include surrounding context lines. Case-insensitive by default. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    text: z.string().describe("Text to search for"),
+    caseSensitive: z.boolean().optional().default(false),
+    context: z.number().int().min(0).optional().default(0).describe("Number of lines to include above and below each match")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const results = await findInFile(validPath, args.text, { caseSensitive: args.caseSensitive, context: args.context });
+  let text;
+  if (results.length === 0) {
+    text = 'No matches found';
+  } else if (args.context > 0) {
+    text = results.map(r => {
+      const lines = r.contextLines.map(l => `${l.isMatch ? '>' : ' '} ${l.line}: ${l.text}`).join('\n');
+      return `Match at line ${r.matchLine}:\n${lines}`;
+    }).join('\n\n');
+  } else {
+    text = results.map(r => `${r.line}: ${r.text}`).join('\n');
+  }
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("file_stats", {
+  title: "File Stats",
+  description: "Return quick metadata about a file: size, total line count, last modified time, and a 5-line preview. Use this to orient yourself before deciding how to read or edit a file, avoiding unnecessary full reads. Only works within allowed directories.",
+  inputSchema: { path: z.string() },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const info = await fileStats(validPath);
+  const text = [
+    `size: ${info.size} bytes`,
+    `lines: ${info.lineCount ?? 'N/A'}`,
+    `modified: ${info.modified}`,
+    `preview:`,
+    info.preview
+  ].join('\n');
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("replace_lines", {
+  title: "Replace Lines",
+  description: "Replace a range of lines in a file by line number. More token-efficient than edit_file when you already know the line numbers from find_in_file. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    start: z.number().int().min(1).describe("First line to replace (1-indexed)"),
+    end: z.number().int().describe("Last line to replace (inclusive)"),
+    content: z.string().describe("New content to replace the line range with")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await replaceLines(validPath, args.start, args.end, args.content);
+  const text = `Replaced ${result.replacedLines} lines with ${result.newLines} lines. File now has ${result.total} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("insert_lines", {
+  title: "Insert Lines",
+  description: "Insert new content after a specific line number. Use line 0 to insert at the beginning of the file. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    after_line: z.number().int().min(0).describe("Insert after this line number. Use 0 to insert at the beginning."),
+    content: z.string().describe("Content to insert")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: false }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await insertLines(validPath, args.after_line, args.content);
+  const text = `Inserted ${result.insertedLines} lines after line ${args.after_line}. File now has ${result.total} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("delete_lines", {
+  title: "Delete Lines",
+  description: "Delete a range of lines from a file by line number. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    start: z.number().int().min(1).describe("First line to delete (1-indexed)"),
+    end: z.number().int().describe("Last line to delete (inclusive)")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await deleteLines(validPath, args.start, args.end);
+  const text = `Deleted ${result.deletedLines} lines. File now has ${result.total} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("append_to_file", {
+  title: "Append to File",
+  description: "Append content to the end of an existing file without reading or rewriting it. Much more efficient than write_file when you just need to add to the end. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    content: z.string().describe("Content to append")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: false }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  await appendToFile(validPath, args.content);
+  const text = `Successfully appended to ${args.path}`;
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
 
