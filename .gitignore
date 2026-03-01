@@ -1,8 +1,11 @@
 # Dependencies
 node_modules/
 
-# Build output
+# Build output (no longer used - project runs plain JS)
 dist/
+
+# TypeScript source (migrated to JS)
+*.ts
 
 # Logs
 *.log
