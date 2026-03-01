@@ -10,6 +10,7 @@ Server: `node /home/rijad/FilesystemMCP/index.js /home/rijad`
 | Writing & editing files | `ref/writing.md` |
 | Navigating directories | `ref/directories.md` |
 | Adding or modifying tools | `ref/dev.md` |
+| Working with a specific file type | `ref/filetypes/index.md` |
 
 ## Golden workflow for editing
 

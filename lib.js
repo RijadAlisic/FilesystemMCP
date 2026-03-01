@@ -306,7 +306,7 @@ export async function replaceLines(filePath, start, end, newContent) {
   const newLines = normalizeLineEndings(newContent).split('\n');
   lines.splice(from, to - from, ...newLines);
   const result = lines.join('\n');
-  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
   await fs.writeFile(tempPath, result, 'utf-8');
   await fs.rename(tempPath, filePath);
   return { replacedLines: to - from, newLines: newLines.length, total: lines.length };
@@ -319,7 +319,7 @@ export async function insertLines(filePath, afterLine, newContent) {
   const insertAt = Math.min(afterLine, lines.length);
   lines.splice(insertAt, 0, ...newLines);
   const result = lines.join('\n');
-  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
   await fs.writeFile(tempPath, result, 'utf-8');
   await fs.rename(tempPath, filePath);
   return { insertedAt: insertAt, insertedLines: newLines.length, total: lines.length };
@@ -333,7 +333,7 @@ export async function deleteLines(filePath, start, end) {
   const to = Math.min(end, total);
   lines.splice(from, to - from);
   const result = lines.join('\n');
-  const tempPath = `${filePath}.${(await import('crypto')).randomBytes(16).toString('hex')}.tmp`;
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
   await fs.writeFile(tempPath, result, 'utf-8');
   await fs.rename(tempPath, filePath);
   return { deletedLines: to - from, total: lines.length };
@@ -408,4 +408,126 @@ export async function searchFilesWithValidation(rootPath, pattern, allowedDirect
 
   await search(rootPath);
   return results;
+}
+
+// ─── JS-specific tools ───────────────────────────────────────────────────────
+
+// Patterns that signal the start of a named JS definition
+const JS_DEF_PATTERNS = [
+  // function foo(  /  async function foo(
+  /^(?:export\s+)?(?:default\s+)?async\s+function\s+(\w+)\s*[\(<]/,
+  /^(?:export\s+)?(?:default\s+)?function\s+(\w+)\s*[\(<]/,
+  // const foo = (...) =>  /  const foo = async (...) =>  /  const foo = function(
+  /^(?:export\s+)?const\s+(\w+)\s*=\s*async\s*[\(\(]/,
+  /^(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\(.*\)\s*=>/,
+  /^(?:export\s+)?const\s+(\w+)\s*=\s*function\s*[\(*]/,
+  // class Foo
+  /^(?:export\s+)?(?:default\s+)?class\s+(\w+)/,
+];
+
+function detectJsDefinition(line) {
+  const trimmed = line.trim();
+  for (const pattern of JS_DEF_PATTERNS) {
+    const match = trimmed.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+// Find the line where a brace-delimited block ends, starting from startLine (0-indexed)
+function findBlockEnd(lines, startLine) {
+  let depth = 0;
+  let started = false;
+  for (let i = startLine; i < lines.length; i++) {
+    for (const ch of lines[i]) {
+      if (ch === '{') { depth++; started = true; }
+      else if (ch === '}') { depth--; }
+    }
+    if (started && depth === 0) return i;
+  }
+  return lines.length - 1;
+}
+
+export async function listJsFunctions(filePath) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const results = [];
+  for (let i = 0; i < lines.length; i++) {
+    const name = detectJsDefinition(lines[i]);
+    if (name) {
+      const end = findBlockEnd(lines, i);
+      results.push({ name, startLine: i + 1, endLine: end + 1, type: lines[i].trim().startsWith('class') ? 'class' : 'function' });
+    }
+  }
+  return results;
+}
+
+export async function getJsFunction(filePath, name) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const found = detectJsDefinition(lines[i]);
+    if (found === name) {
+      const end = findBlockEnd(lines, i);
+      return { startLine: i + 1, endLine: end + 1, content: lines.slice(i, end + 1).join('\n') };
+    }
+  }
+  throw new Error(`Could not find JS definition: ${name}`);
+}
+
+export async function replaceJsFunction(filePath, name, newContent) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const found = detectJsDefinition(lines[i]);
+    if (found === name) {
+      const end = findBlockEnd(lines, i);
+      const newLines = normalizeLineEndings(newContent).split('\n');
+      lines.splice(i, end - i + 1, ...newLines);
+      const result = lines.join('\n');
+      const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
+      await fs.writeFile(tempPath, result, 'utf-8');
+      await fs.rename(tempPath, filePath);
+      return { replacedLines: end - i + 1, newLines: newLines.length };
+    }
+  }
+  throw new Error(`Could not find JS definition: ${name}`);
+}
+
+export async function getJsImports(filePath) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  const imports = [];
+  let lastImportLine = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('import ') || t.startsWith('const ') && t.includes('require(')) {
+      imports.push({ line: i + 1, text: lines[i] });
+      lastImportLine = i + 1;
+    }
+  }
+  return { imports, lastImportLine };
+}
+
+export async function replaceJsImports(filePath, newImportsContent) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines = normalizeLineEndings(content).split('\n');
+  // Find contiguous import block at top of file (skip shebang/comments)
+  let start = 0;
+  let end = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('#!') || t.startsWith('//') || t === '') continue;
+    if (t.startsWith('import ') || (t.startsWith('const ') && t.includes('require('))) {
+      if (start === 0) start = i;
+      end = i;
+    } else if (start > 0) break;
+  }
+  const newLines = normalizeLineEndings(newImportsContent).split('\n');
+  lines.splice(start, end - start + 1, ...newLines);
+  const result = lines.join('\n');
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, result, 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { start: start + 1, end: end + 1, newLines: newLines.length };
 }

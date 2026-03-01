@@ -31,6 +31,11 @@ import {
   insertLines,
   deleteLines,
   appendToFile,
+  listJsFunctions,
+  getJsFunction,
+  replaceJsFunction,
+  getJsImports,
+  replaceJsImports,
 } from './lib.js';
 
 // Command line argument parsing
@@ -503,6 +508,83 @@ server.registerTool("find_in_files", {
   const text = results.length > 0 ? results.map(r => `${r.file}:${r.line}: ${r.text}`).join("\n") : "No matches found";
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
+
+server.registerTool("list_js_functions", {
+  title: "List JS Functions",
+  description: "List all function and class definitions in a JavaScript file, with their start and end line numbers. Use this to get an overview of a JS file's structure before reading or editing a specific function. Only works within allowed directories.",
+  inputSchema: { path: z.string() },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const results = await listJsFunctions(validPath);
+  const text = results.length > 0
+    ? results.map(r => `${r.type} ${r.name} (lines ${r.startLine}–${r.endLine})`).join('\n')
+    : 'No function or class definitions found';
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("get_js_function", {
+  title: "Get JS Function",
+  description: "Extract a named function or class from a JavaScript file by name, returning its full source and line range. Use list_js_functions first to confirm the name. Only works within allowed directories.",
+  inputSchema: { path: z.string(), name: z.string().describe("Function or class name to extract") },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await getJsFunction(validPath, args.name);
+  const text = `Lines ${result.startLine}–${result.endLine}:\n${result.content}`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("replace_js_function", {
+  title: "Replace JS Function",
+  description: "Replace a named function or class in a JavaScript file by name. Finds the full function body automatically — no need to know line numbers. newContent must include the full function definition including its signature. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    name: z.string().describe("Function or class name to replace"),
+    newContent: z.string().describe("Full replacement including the function signature and body")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await replaceJsFunction(validPath, args.name, args.newContent);
+  const text = `Replaced ${result.replacedLines} lines with ${result.newLines} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("get_js_imports", {
+  title: "Get JS Imports",
+  description: "Extract all import and require statements from a JavaScript file, with line numbers. Use this to inspect dependencies before adding or modifying imports. Only works within allowed directories.",
+  inputSchema: { path: z.string() },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const { imports, lastImportLine } = await getJsImports(validPath);
+  const text = imports.length > 0
+    ? `Last import on line ${lastImportLine}:\n` + imports.map(i => `${i.line}: ${i.text}`).join('\n')
+    : 'No imports found';
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("replace_js_imports", {
+  title: "Replace JS Imports",
+  description: "Replace the entire imports block of a JavaScript file. Use get_js_imports first to see the current imports. newContent should contain only the new import statements. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    newContent: z.string().describe("Full replacement import block")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await replaceJsImports(validPath, args.newContent);
+  const text = `Replaced imports (lines ${result.start}–${result.end}) with ${result.newLines} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
 
 server.registerTool("list_allowed_directories", {
   title: "List Allowed Directories",
