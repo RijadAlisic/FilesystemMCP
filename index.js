@@ -95,6 +95,41 @@ async function readFileAsBase64Stream(filePath) {
   });
 }
 
+// Strip inline # comments from code files, preserving docstrings and string literals.
+// Applied to all reads so Claude sees clean code without implementation noise.
+const CODE_EXTENSIONS = new Set(['.py', '.js', '.ts', '.jsx', '.tsx', '.sh', '.rb', '.r', '.jl']);
+
+function stripInlineComments(content, ext) {
+  if (!CODE_EXTENSIONS.has(ext)) return content;
+  const lines = content.split('\n');
+  const result = [];
+  let inTripleDouble = false;
+  let inTripleSingle = false;
+
+  for (const line of lines) {
+    // Track triple-quoted string state (docstrings)
+    const tripleDoubleCount = (line.match(/"""/g) || []).length;
+    const tripleSingleCount = (line.match(/'''/g) || []).length;
+    if (tripleDoubleCount % 2 !== 0) inTripleDouble = !inTripleDouble;
+    if (tripleSingleCount % 2 !== 0) inTripleSingle = !inTripleSingle;
+
+    // Inside a docstring: keep as-is
+    if (inTripleDouble || inTripleSingle) { result.push(line); continue; }
+
+    // Strip # comment: scan char by char to skip string literals
+    let inSingle = false, inDouble = false, i = 0, out = '';
+    while (i < line.length) {
+      const ch = line[i];
+      if (ch === "'" && !inDouble) { inSingle = !inSingle; out += ch; i++; continue; }
+      if (ch === '"' && !inSingle) { inDouble = !inDouble; out += ch; i++; continue; }
+      if (ch === '#' && !inSingle && !inDouble) break; // strip from here
+      out += ch; i++;
+    }
+    result.push(out.trimEnd());
+  }
+  return result.join('\n');
+}
+
 // read_file and read_text_file
 const readTextFileHandler = async (args) => {
   const validPath = await validatePath(args.path);
@@ -103,6 +138,10 @@ const readTextFileHandler = async (args) => {
   if (args.tail) content = await tailFile(validPath, args.tail);
   else if (args.head) content = await headFile(validPath, args.head);
   else content = await readFileContent(validPath);
+  if (!args.include_comments) {
+    const ext = path.extname(validPath).toLowerCase();
+    content = stripInlineComments(content, ext);
+  }
   return { content: [{ type: "text", text: content }], structuredContent: { content } };
 };
 
@@ -116,8 +155,8 @@ server.registerTool("read_file", {
 
 server.registerTool("read_text_file", {
   title: "Read Text File",
-  description: "Read the complete contents of a file from the file system as text. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Use the 'head' parameter to read only the first N lines of a file, or the 'tail' parameter to read only the last N lines of a file. Operates on the file as text regardless of extension. Only works within allowed directories.",
-  inputSchema: { path: z.string(), tail: z.number().optional().describe("If provided, returns only the last N lines of the file"), head: z.number().optional().describe("If provided, returns only the first N lines of the file") },
+  description: "Read the complete contents of a file from the file system as text. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Use the 'head' parameter to read only the first N lines of a file, or the 'tail' parameter to read only the last N lines of a file. Operates on the file as text regardless of extension. Only works within allowed directories. By default, inline # comments are stripped from code files to reduce noise — set include_comments=true to read them.",
+  inputSchema: { path: z.string(), tail: z.number().optional().describe("If provided, returns only the last N lines of the file"), head: z.number().optional().describe("If provided, returns only the first N lines of the file"), include_comments: z.boolean().optional().describe("If true, inline # comments are preserved. Default false (comments stripped).") },
   outputSchema: { content: z.string() },
   annotations: { readOnlyHint: true }
 }, readTextFileHandler);
@@ -146,14 +185,16 @@ server.registerTool("read_media_file", {
 server.registerTool("read_multiple_files", {
   title: "Read Multiple Files",
   description: "Read the contents of multiple files simultaneously. This is more efficient than reading files one by one when you need to analyze or compare multiple files. Each file's content is returned with its path as a reference. Failed reads for individual files won't stop the entire operation. Only works within allowed directories.",
-  inputSchema: { paths: z.array(z.string()).min(1).describe("Array of file paths to read. Each path must be a string pointing to a valid file within allowed directories.") },
+  inputSchema: { paths: z.array(z.string()).min(1).describe("Array of file paths to read. Each path must be a string pointing to a valid file within allowed directories."), include_comments: z.boolean().optional().describe("If true, inline # comments are preserved. Default false (comments stripped).") },
   outputSchema: { content: z.string() },
   annotations: { readOnlyHint: true }
 }, async (args) => {
   const results = await Promise.all(args.paths.map(async (filePath) => {
     try {
       const validPath = await validatePath(filePath);
-      const content = await readFileContent(validPath);
+      const raw = await readFileContent(validPath);
+      const ext = path.extname(validPath).toLowerCase();
+      const content = args.include_comments ? raw : stripInlineComments(raw, ext);
       return `${filePath}:\n${content}\n`;
     } catch (error) {
       return `${filePath}: Error - ${error.message}`;

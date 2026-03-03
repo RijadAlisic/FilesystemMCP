@@ -18,3 +18,16 @@
 ## Rules
 - Never read an entire file just to find one section — use `file_stats` + `find_in_file` first
 - For files over ~200 lines, always use `find_in_file` + `read_lines` instead of `read_text_file`
+
+## Practical patterns (from experience)
+- **Checking if a string exists before editing:** `find_in_file` with `context: 2` gives you the surrounding
+  lines in one call — enough to construct a safe oldText for `edit_file` without a separate `read_lines`.
+- **Reading the bottom of a growing log file:** use `read_text_file` with `tail: N` — much faster than
+  reading the whole file when you only care about recent entries.
+- **Confirming a write worked:** after `write_file` on a critical file, do a quick `file_stats` to verify
+  the line count looks right. Catches silent truncation.
+- **tool_search must be called before using any deferred tool.** Even if you used `write_file` earlier
+  in the session, if the context window has rolled, the tool may be unloaded. When a tool call returns
+  an 'not loaded' error, call `tool_search` with a relevant query and retry — do not give up.
+- **read_multiple_files for orientation:** when starting work on an unfamiliar set of files, call
+  `read_multiple_files` on all the small ones at once rather than reading them sequentially.
