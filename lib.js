@@ -234,27 +234,18 @@ export async function findInFile(filePath, searchText, options = {}) {
   const { caseSensitive = false, context = 0 } = options;
   const content = await fs.readFile(filePath, 'utf-8').catch(() => null);
   if (!content) throw new Error(`Could not read file: ${filePath}`);
-  const needle = caseSensitive ? searchText : searchText.toLowerCase();
-  const lines = normalizeLineEndings(content).split('\n');
-  const results = [];
-  lines.forEach((line, i) => {
-    const haystack = caseSensitive ? line : line.toLowerCase();
-    if (haystack.includes(needle)) {
-      if (context > 0) {
-        const from = Math.max(0, i - context);
-        const to = Math.min(lines.length - 1, i + context);
-        const contextLines = lines.slice(from, to + 1).map((l, j) => ({
-          line: from + j + 1,
-          text: l.trim(),
-          isMatch: from + j === i
-        }));
-        results.push({ matchLine: i + 1, contextLines });
-      } else {
-        results.push({ line: i + 1, text: line.trim() });
-      }
+  const lines   = normalizeLineEndings(content).split('\n');
+  const matches = _multilineSearch(lines, searchText, caseSensitive);
+  if (context === 0) return matches;
+  return matches.map(m => {
+    const ctxStart = Math.max(0, m.startLine - 1 - context);
+    const ctxEnd   = Math.min(lines.length - 1, m.endLine - 1 + context);
+    const contextLines = [];
+    for (let c = ctxStart; c <= ctxEnd; c++) {
+      contextLines.push({ line: c + 1, text: lines[c], isMatch: c >= m.startLine - 1 && c <= m.endLine - 1 });
     }
+    return { ...m, contextLines };
   });
-  return results;
 }
 
 export async function fileStats(filePath) {
@@ -329,7 +320,6 @@ export async function copyFile(sourcePath, destPath) {
 export async function findInFiles(rootPath, searchText, options = {}) {
   const { excludePatterns = [], caseSensitive = false, filePattern = '**/*' } = options;
   const results = [];
-  const needle = caseSensitive ? searchText : searchText.toLowerCase();
 
   async function search(currentPath) {
     const entries = await fs.readdir(currentPath, { withFileTypes: true });
@@ -346,11 +336,11 @@ export async function findInFiles(rootPath, searchText, options = {}) {
           if (!minimatch(relativePath, filePattern, { dot: true })) continue;
           const content = await fs.readFile(fullPath, 'utf-8').catch(() => null);
           if (!content) continue;
-          const lines = content.split('\n');
-          lines.forEach((line, i) => {
-            const haystack = caseSensitive ? line : line.toLowerCase();
-            if (haystack.includes(needle)) results.push({ file: fullPath, line: i + 1, text: line.trim() });
-          });
+          const lines   = normalizeLineEndings(content).split('\n');
+          const matches = _multilineSearch(lines, searchText, caseSensitive);
+          for (const m of matches) {
+            results.push({ file: fullPath, startLine: m.startLine, endLine: m.endLine, matchText: m.matchText });
+          }
         }
       } catch { continue; }
     }
@@ -503,4 +493,84 @@ export async function replaceJsImports(filePath, newImportsContent) {
   await fs.writeFile(tempPath, result, 'utf-8');
   await fs.rename(tempPath, filePath);
   return { start: start + 1, end: end + 1, newLines: newLines.length };
+}
+
+
+// ── Multi-line search helper ─────────────────────────────────────────────────
+// Matches searchText against file lines with whitespace-normalized matching so
+// phrases split across two lines (e.g. at 80-char wrap) are still found.
+// Returns [{ startLine, endLine, matchText }] (1-indexed, inclusive).
+export function _multilineSearch(lines, searchText, caseSensitive = false) {
+  const norm   = s => (caseSensitive ? s : s.toLowerCase()).replace(/\s+/g, ' ');
+  const needle = norm(searchText).trim();
+  if (!needle) return [];
+
+  // Build flat string (newlines → space) and char→line map
+  const lineOf  = [];
+  const flatArr = [];
+  for (let li = 0; li < lines.length; li++) {
+    for (const ch of lines[li]) { lineOf.push(li + 1); flatArr.push(ch); }
+    if (li < lines.length - 1) { lineOf.push(li + 1); flatArr.push('\n'); }
+  }
+
+  // Whitespace-normalise flat, keeping a normIdx→origIdx map
+  const normToOrig = [];
+  let normFlat     = '';
+  let prevSpace    = true;
+  for (let i = 0; i < flatArr.length; i++) {
+    const isWS = /\s/.test(flatArr[i]);
+    if (isWS) {
+      if (!prevSpace) { normToOrig.push(i); normFlat += ' '; }
+      prevSpace = true;
+    } else {
+      normToOrig.push(i);
+      normFlat += caseSensitive ? flatArr[i] : flatArr[i].toLowerCase();
+      prevSpace = false;
+    }
+  }
+
+  const results = [];
+  let pos = 0;
+  while (pos < normFlat.length) {
+    const idx = normFlat.indexOf(needle, pos);
+    if (idx === -1) break;
+    const origStart = normToOrig[idx];
+    const origEnd   = normToOrig[Math.min(idx + needle.length - 1, normToOrig.length - 1)];
+    const startLine = lineOf[origStart];
+    const endLine   = lineOf[origEnd];
+    results.push({ startLine, endLine, matchText: lines.slice(startLine - 1, endLine).join('\n') });
+    pos = idx + 1;
+  }
+  return results;
+}
+
+// ── add_js_import helper ─────────────────────────────────────────────────────
+// Appends a single import statement after the last existing import line.
+// Idempotent: if the statement (normalised) already exists, returns early.
+export async function addJsImport(filePath, importStatement) {
+  const content = await fs.readFile(filePath, 'utf-8');
+  const lines   = normalizeLineEndings(content).split('\n');
+
+  // Idempotency check (normalised comparison)
+  const normNew = importStatement.trim().replace(/\s+/g, ' ');
+  if (lines.some(l => l.trim().replace(/\s+/g, ' ') === normNew)) {
+    return { alreadyPresent: true, line: null };
+  }
+
+  // Find last import line
+  let lastImportIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t.startsWith('import ') || (t.startsWith('const ') && t.includes('require('))) {
+      lastImportIdx = i;
+    }
+  }
+
+  const insertAt = lastImportIdx >= 0 ? lastImportIdx + 1 : 0;
+  lines.splice(insertAt, 0, importStatement.trimEnd());
+  const result   = lines.join('\n');
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, result, 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { alreadyPresent: false, line: insertAt + 1 };
 }

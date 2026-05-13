@@ -36,6 +36,7 @@ import {
   replaceJsFunction,
   getJsImports,
   replaceJsImports,
+  addJsImport,
 } from './lib.js';
 
 // Command line argument parsing
@@ -391,10 +392,10 @@ server.registerTool("read_lines", {
 
 server.registerTool("find_in_file", {
   title: "Find in File",
-  description: "Search for a keyword or phrase within a single file and return all matching line numbers and text. Use this before read_lines or edit_file to locate exactly where something is without reading the whole file. Optionally include surrounding context lines. Case-insensitive by default. Only works within allowed directories.",
+  description: "Search for a phrase within a single file. Handles phrases split across lines (e.g. at 80-char wrap) by matching with whitespace normalization. Returns startLine, endLine, and matchText for each hit — use these directly with edit_file or read_lines. Optionally include surrounding context lines. Only works within allowed directories.",
   inputSchema: {
     path: z.string(),
-    text: z.string().describe("Text to search for"),
+    text: z.string().describe("Text to search for. Whitespace (including newlines) is normalized, so multi-word phrases find matches even if split across lines."),
     caseSensitive: z.boolean().optional().default(false),
     context: z.number().int().min(0).optional().default(0).describe("Number of lines to include above and below each match")
   },
@@ -408,11 +409,15 @@ server.registerTool("find_in_file", {
     text = 'No matches found';
   } else if (args.context > 0) {
     text = results.map(r => {
-      const lines = r.contextLines.map(l => `${l.isMatch ? '>' : ' '} ${l.line}: ${l.text}`).join('\n');
-      return `Match at line ${r.matchLine}:\n${lines}`;
+      const ctxLines = r.contextLines.map(l => `${l.isMatch ? '>' : ' '} ${l.line}: ${l.text}`).join('\n');
+      const range = r.startLine === r.endLine ? `line ${r.startLine}` : `lines ${r.startLine}-${r.endLine}`;
+      return `Match at ${range}:\n${ctxLines}`;
     }).join('\n\n');
   } else {
-    text = results.map(r => `${r.line}: ${r.text}`).join('\n');
+    text = results.map(r => {
+      const range = r.startLine === r.endLine ? `${r.startLine}` : `${r.startLine}-${r.endLine}`;
+      return `${range}: ${r.matchText}`;
+    }).join('\n');
   }
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
@@ -533,10 +538,10 @@ server.registerTool("copy_file", {
 
 server.registerTool("find_in_files", {
   title: "Find in Files",
-  description: "Search for a text string inside file contents recursively under a directory. Returns each matching file path, line number, and the matching line. Optionally filter by file glob pattern or exclude paths. Case-insensitive by default. Only works within allowed directories.",
+  description: "Search for a phrase inside file contents recursively under a directory. Handles phrases split across lines (e.g. at 80-char wrap). Returns file, startLine, endLine, and matchText for each hit. Optionally filter by file glob pattern or exclude paths. Case-insensitive by default. Only works within allowed directories.",
   inputSchema: {
     path: z.string().describe("Root directory to search in"),
-    text: z.string().describe("Text to search for"),
+    text: z.string().describe("Text to search for. Whitespace is normalized so multi-word phrases are found even if split across lines."),
     filePattern: z.string().optional().describe("Glob pattern to filter files, e.g. '**/*.ts'"),
     caseSensitive: z.boolean().optional().default(false),
     excludePatterns: z.array(z.string()).optional().default([])
@@ -550,7 +555,12 @@ server.registerTool("find_in_files", {
     filePattern: args.filePattern,
     excludePatterns: args.excludePatterns
   });
-  const text = results.length > 0 ? results.map(r => `${r.file}:${r.line}: ${r.text}`).join("\n") : "No matches found";
+  const text = results.length > 0
+    ? results.map(r => {
+        const range = r.startLine === r.endLine ? `${r.startLine}` : `${r.startLine}-${r.endLine}`;
+        return `${r.file}:${range}: ${r.matchText}`;
+      }).join('\n')
+    : 'No matches found';
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
 
@@ -629,6 +639,25 @@ server.registerTool("replace_js_imports", {
   const text = `Replaced imports (lines ${result.start}–${result.end}) with ${result.newLines} lines.`;
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
+
+server.registerTool("add_js_import", {
+  title: "Add JS Import",
+  description: "Append a single import (or require) statement after the last existing import in a JavaScript file. Idempotent — does nothing if the exact statement is already present. Use this instead of replace_js_imports when you only need to add one new dependency. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    statement: z.string().describe("Full import statement to add, e.g. \"import { foo } from 'bar'\" or \"const x = require('x')\"")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await addJsImport(validPath, args.statement);
+  const text = result.alreadyPresent
+    ? `Import already present — no changes made.`
+    : `Import added at line ${result.line}.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
 
 
 server.registerTool("list_allowed_directories", {
