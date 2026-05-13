@@ -219,10 +219,14 @@ server.registerTool("write_file", {
 
 server.registerTool("edit_file", {
   title: "Edit File",
-  description: "Make line-based edits to a text file. Each edit replaces exact line sequences with new content. Returns a git-style diff showing the changes made. Only works within allowed directories.",
+  description: "Make line-based edits to a text file. Each edit replaces a line range with new content (which may span any number of lines). Edits are applied in reverse line order so indices stay stable. Returns a git-style diff. Only works within allowed directories.",
   inputSchema: {
     path: z.string(),
-    edits: z.array(z.object({ oldText: z.string().describe("Text to search for - must match exactly"), newText: z.string().describe("Text to replace with") })),
+    edits: z.array(z.object({
+      startLine: z.number().int().min(1).describe("First line to replace (1-indexed, inclusive)"),
+      endLine:   z.number().int().optional().describe("Last line to replace (1-indexed, inclusive). Defaults to startLine for single-line replacement."),
+      newText:   z.string().optional().describe("Replacement text. Can be multiline. Omit or use empty string to delete the lines.")
+    })).describe("List of line-range replacements — applied in reverse order so earlier line numbers stay valid"),
     dryRun: z.boolean().default(false).describe("Preview changes using git-style diff format")
   },
   outputSchema: { content: z.string() },

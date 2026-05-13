@@ -122,47 +122,20 @@ export async function writeFileContent(filePath, content) {
 
 export async function applyFileEdits(filePath, edits, dryRun = false) {
   const content = normalizeLineEndings(await fs.readFile(filePath, 'utf-8'));
-  let modifiedContent = content;
+  const lines = content.split('\n');
+  const total = lines.length;
 
-  for (const edit of edits) {
-    const normalizedOld = normalizeLineEndings(edit.oldText);
-    const normalizedNew = normalizeLineEndings(edit.newText);
-
-    if (modifiedContent.includes(normalizedOld)) {
-      modifiedContent = modifiedContent.replace(normalizedOld, normalizedNew);
-      continue;
-    }
-
-    const oldLines = normalizedOld.split('\n');
-    const contentLines = modifiedContent.split('\n');
-    let matchFound = false;
-
-    for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
-      const potentialMatch = contentLines.slice(i, i + oldLines.length);
-      const isMatch = oldLines.every((oldLine, j) => oldLine.trim() === potentialMatch[j].trim());
-
-      if (isMatch) {
-        const originalIndent = contentLines[i].match(/^\s*/)?.[0] || '';
-        const newLines = normalizedNew.split('\n').map((line, j) => {
-          if (j === 0) return originalIndent + line.trimStart();
-          const oldIndent = oldLines[j]?.match(/^\s*/)?.[0] || '';
-          const newIndent = line.match(/^\s*/)?.[0] || '';
-          if (oldIndent && newIndent) {
-            const relativeIndent = newIndent.length - oldIndent.length;
-            return originalIndent + ' '.repeat(Math.max(0, relativeIndent)) + line.trimStart();
-          }
-          return line;
-        });
-        contentLines.splice(i, oldLines.length, ...newLines);
-        modifiedContent = contentLines.join('\n');
-        matchFound = true;
-        break;
-      }
-    }
-
-    if (!matchFound) throw new Error(`Could not find exact match for edit:\n${edit.oldText}`);
+  // Apply in reverse order so earlier line numbers stay valid after each splice
+  const sorted = [...edits].sort((a, b) => b.startLine - a.startLine);
+  for (const edit of sorted) {
+    const start       = Math.max(1, edit.startLine) - 1;  // convert to 0-indexed
+    const end         = edit.endLine !== undefined ? Math.min(total, edit.endLine) : edit.startLine;
+    const deleteCount = end - start;                       // number of lines to remove
+    const replacement = edit.newText ? edit.newText.split('\n') : [];
+    lines.splice(start, deleteCount, ...replacement);
   }
 
+  const modifiedContent = lines.join('\n');
   const diff = createUnifiedDiff(content, modifiedContent, filePath);
   let numBackticks = 3;
   while (diff.includes('`'.repeat(numBackticks))) numBackticks++;
