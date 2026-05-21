@@ -228,13 +228,14 @@ server.registerTool("edit_file", {
       endLine:   z.number().int().optional().describe("Last line to replace (1-indexed, inclusive). Defaults to startLine for single-line replacement."),
       newText:   z.string().optional().describe("Replacement text. Can be multiline. Omit or use empty string to delete the lines.")
     })).describe("List of line-range replacements — applied in reverse order so earlier line numbers stay valid"),
-    dryRun: z.boolean().default(false).describe("Preview changes using git-style diff format")
+    dryRun: z.boolean().default(false).describe("Preview changes using git-style diff format"),
+    context: z.number().int().min(0).default(1).describe("Lines of context shown around each changed hunk in the returned diff (default: 1). Increase to verify edits landed correctly.")
   },
   outputSchema: { content: z.string() },
   annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true }
 }, async (args) => {
   const validPath = await validatePath(args.path);
-  const result = await applyFileEdits(validPath, args.edits, args.dryRun);
+  const result = await applyFileEdits(validPath, args.edits, args.dryRun, args.context ?? 1);
   return { content: [{ type: "text", text: result }], structuredContent: { content: result } };
 });
 

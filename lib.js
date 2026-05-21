@@ -29,12 +29,13 @@ export function normalizeLineEndings(text) {
   return text.replace(/\r\n/g, '\n');
 }
 
-export function createUnifiedDiff(originalContent, newContent, filepath = 'file') {
+export function createUnifiedDiff(originalContent, newContent, filepath = 'file', context = 1) {
   return createTwoFilesPatch(
     filepath, filepath,
     normalizeLineEndings(originalContent),
     normalizeLineEndings(newContent),
-    'original', 'modified'
+    'original', 'modified',
+    { context }
   );
 }
 
@@ -120,7 +121,7 @@ export async function writeFileContent(filePath, content) {
   }
 }
 
-export async function applyFileEdits(filePath, edits, dryRun = false) {
+export async function applyFileEdits(filePath, edits, dryRun = false, context = 1) {
   const content = normalizeLineEndings(await fs.readFile(filePath, 'utf-8'));
   const lines = content.split('\n');
   const total = lines.length;
@@ -136,10 +137,7 @@ export async function applyFileEdits(filePath, edits, dryRun = false) {
   }
 
   const modifiedContent = lines.join('\n');
-  const diff = createUnifiedDiff(content, modifiedContent, filePath);
-  let numBackticks = 3;
-  while (diff.includes('`'.repeat(numBackticks))) numBackticks++;
-  const formattedDiff = `${'`'.repeat(numBackticks)}diff\n${diff}${'`'.repeat(numBackticks)}\n\n`;
+  const diff = createUnifiedDiff(content, modifiedContent, filePath, context);
 
   if (!dryRun) {
     const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
@@ -152,6 +150,9 @@ export async function applyFileEdits(filePath, edits, dryRun = false) {
     }
   }
 
+  let numBackticks = 3;
+  while (diff.includes('`'.repeat(numBackticks))) numBackticks++;
+  const formattedDiff = `${'`'.repeat(numBackticks)}diff\n${diff}${'`'.repeat(numBackticks)}\n\n`;
   return formattedDiff;
 }
 
