@@ -121,6 +121,46 @@ export async function writeFileContent(filePath, content) {
   }
 }
 
+async function pathExists(p) {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Finds the next available "name (1).ext", "name (2).ext", ... path that does not
+// collide with an existing file. Never overwrites — always increments until free.
+export async function findAvailablePath(originalPath) {
+  if (!(await pathExists(originalPath))) return originalPath;
+  const dir  = path.dirname(originalPath);
+  const ext  = path.extname(originalPath);
+  const base = path.basename(originalPath, ext);
+  let n = 1;
+  let candidate;
+  do {
+    candidate = path.join(dir, `${base} (${n})${ext}`);
+    n++;
+  } while (await pathExists(candidate));
+  return candidate;
+}
+
+// Writes content to filePath only if it does not already exist. If it does,
+// writes to the next available incremented filename instead and reports that
+// back to the caller, rather than silently overwriting.
+export async function writeFileSafe(filePath, content) {
+  const existed = await pathExists(filePath);
+  if (!existed) {
+    await fs.writeFile(filePath, content, { encoding: 'utf-8', flag: 'wx' });
+    return { path: filePath, redirected: false };
+  }
+  const altPath = await findAvailablePath(filePath);
+  await fs.writeFile(altPath, content, { encoding: 'utf-8', flag: 'wx' });
+  return { path: altPath, redirected: true, originalPath: filePath };
+}
+
+
 export async function applyFileEdits(filePath, edits, dryRun = false, context = 1) {
   const content = normalizeLineEndings(await fs.readFile(filePath, 'utf-8'));
   const lines = content.split('\n');
@@ -302,6 +342,96 @@ export async function deleteLines(filePath, start, end) {
   await fs.writeFile(tempPath, result, 'utf-8');
   await fs.rename(tempPath, filePath);
   return { deletedLines: to - from, total: lines.length };
+}
+
+export async function copyLines(filePath, start, end, insertAfterLine) {
+  const content  = await fs.readFile(filePath, 'utf-8');
+  const lines    = normalizeLineEndings(content).split('\n');
+  const from     = Math.max(1, start) - 1;
+  const blockLen = Math.min(end, lines.length) - from;
+  if (blockLen <= 0) throw new Error(`copy_lines: invalid range ${start}-${end}`);
+  const block    = lines.slice(from, from + blockLen);
+  const insertAt = Math.min(Math.max(0, insertAfterLine), lines.length);
+  lines.splice(insertAt, 0, ...block);
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, lines.join('\n'), 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { copiedLines: blockLen, insertedAfter: insertAfterLine, total: lines.length };
+}
+
+export async function moveLines(filePath, start, end, insertAfterLine) {
+  if (insertAfterLine >= start && insertAfterLine <= end)
+    throw new Error(`move_lines: insertAfterLine (${insertAfterLine}) is inside the source range (${start}-${end})`);
+  const content  = await fs.readFile(filePath, 'utf-8');
+  const lines    = normalizeLineEndings(content).split('\n');
+  const from     = Math.max(1, start) - 1;
+  const blockLen = Math.min(end, lines.length) - from;
+  if (blockLen <= 0) throw new Error(`move_lines: invalid range ${start}-${end}`);
+  const block    = lines.splice(from, blockLen);
+  const insertAt = insertAfterLine > from
+    ? Math.max(from, insertAfterLine - blockLen)
+    : insertAfterLine;
+  lines.splice(insertAt, 0, ...block);
+  const tempPath = `${filePath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, lines.join('\n'), 'utf-8');
+  await fs.rename(tempPath, filePath);
+  return { movedLines: blockLen, insertedAfter: insertAt, total: lines.length };
+}
+
+export async function copyLinesBetweenFiles(sourcePath, start, end, destPath, insertAfterLine) {
+  const sourceContent = await fs.readFile(sourcePath, 'utf-8');
+  const sourceLines    = normalizeLineEndings(sourceContent).split('\n');
+  const from           = Math.max(1, start) - 1;
+  const blockLen       = Math.min(end, sourceLines.length) - from;
+  if (blockLen <= 0) throw new Error(`copy_lines_between_files: invalid range ${start}-${end}`);
+  const block          = sourceLines.slice(from, from + blockLen);
+
+  let destLines;
+  try {
+    const destContent = await fs.readFile(destPath, 'utf-8');
+    destLines = normalizeLineEndings(destContent).split('\n');
+  } catch (err) {
+    if (err.code === 'ENOENT') destLines = [''];
+    else throw err;
+  }
+  const insertAt = Math.min(Math.max(0, insertAfterLine), destLines.length);
+  destLines.splice(insertAt, 0, ...block);
+
+  const tempPath = `${destPath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(tempPath, destLines.join('\n'), 'utf-8');
+  await fs.rename(tempPath, destPath);
+  return { copiedLines: blockLen, insertedAfter: insertAfterLine, destTotal: destLines.length };
+}
+
+export async function moveLinesBetweenFiles(sourcePath, start, end, destPath, insertAfterLine) {
+  const sourceContent = await fs.readFile(sourcePath, 'utf-8');
+  const sourceLines    = normalizeLineEndings(sourceContent).split('\n');
+  const from           = Math.max(1, start) - 1;
+  const blockLen       = Math.min(end, sourceLines.length) - from;
+  if (blockLen <= 0) throw new Error(`move_lines_between_files: invalid range ${start}-${end}`);
+  const block          = sourceLines.splice(from, blockLen);
+
+  let destLines;
+  try {
+    const destContent = await fs.readFile(destPath, 'utf-8');
+    destLines = normalizeLineEndings(destContent).split('\n');
+  } catch (err) {
+    if (err.code === 'ENOENT') destLines = [''];
+    else throw err;
+  }
+  const insertAt = Math.min(Math.max(0, insertAfterLine), destLines.length);
+  destLines.splice(insertAt, 0, ...block);
+
+  // Write destination first, then source — if source write fails, dest still has the copy (safer than losing data)
+  const destTemp = `${destPath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(destTemp, destLines.join('\n'), 'utf-8');
+  await fs.rename(destTemp, destPath);
+
+  const srcTemp = `${sourcePath}.${randomBytes(16).toString('hex')}.tmp`;
+  await fs.writeFile(srcTemp, sourceLines.join('\n'), 'utf-8');
+  await fs.rename(srcTemp, sourcePath);
+
+  return { movedLines: blockLen, insertedAfter: insertAfterLine, destTotal: destLines.length, sourceTotal: sourceLines.length };
 }
 
 export async function appendToFile(filePath, content) {

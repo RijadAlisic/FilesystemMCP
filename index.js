@@ -16,6 +16,7 @@ import {
   getFileStats,
   readFileContent,
   writeFileContent,
+  writeFileSafe,
   searchFilesWithValidation,
   applyFileEdits,
   tailFile,
@@ -30,6 +31,10 @@ import {
   replaceLines,
   insertLines,
   deleteLines,
+  copyLines,
+  moveLines,
+  copyLinesBetweenFiles,
+  moveLinesBetweenFiles,
   appendToFile,
   listJsFunctions,
   getJsFunction,
@@ -207,13 +212,17 @@ server.registerTool("read_multiple_files", {
 
 server.registerTool("write_file", {
   title: "Write File",
-  description: "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles text content with proper encoding. Only works within allowed directories.",
+  description: "Create a new file with the given content. NEVER overwrites an existing file — if the path already exists, the content is automatically saved instead to an incremented filename (e.g. 'name (1).ext', 'name (2).ext', ...), and the response flags this so you don't lose track of it. Only works within allowed directories.",
   inputSchema: { path: z.string(), content: z.string() },
   outputSchema: { content: z.string() },
-  annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: true }
+  annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: false }
 }, async (args) => {
   const validPath = await validatePath(args.path);
-  await writeFileContent(validPath, args.content);
+  const result = await writeFileSafe(validPath, args.content);
+  if (result.redirected) {
+    const text = `File "${args.path}" already exists — nothing was overwritten. Content was saved instead to "${result.path}". If you intended to add this content to the existing file, use copy_lines_between_files or move_lines_between_files (or append_to_file) to insert it from "${result.path}" into "${args.path}", then delete "${result.path}" once merged.`;
+    return { content: [{ type: "text", text }], structuredContent: { content: text }, isError: true };
+  }
   const text = `Successfully wrote to ${args.path}`;
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
@@ -493,6 +502,92 @@ server.registerTool("delete_lines", {
   const text = `Deleted ${result.deletedLines} lines. File now has ${result.total} lines.`;
   return { content: [{ type: "text", text }], structuredContent: { content: text } };
 });
+
+server.registerTool("copy_lines", {
+  title: "Copy Lines",
+  description: "Copy a range of lines and insert the copy after a given line number. Original lines are preserved. Use with move_lines to reorganise content without rewriting. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    start: z.number().int().min(1).describe("First line of the block to copy (1-indexed, inclusive)"),
+    end: z.number().int().describe("Last line of the block to copy (1-indexed, inclusive)"),
+    insertAfterLine: z.number().int().min(0).describe("Insert the copied block after this line number. Use 0 to insert at the very beginning.")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: false }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await copyLines(validPath, args.start, args.end, args.insertAfterLine);
+  const startLine = result.insertedAfter + 1;
+  const endLine   = result.insertedAfter + result.copiedLines;
+  const text = `Copied ${result.copiedLines} lines. Inserted copy starts at line ${startLine}, ends at line ${endLine}. File now has ${result.total} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("move_lines", {
+  title: "Move Lines",
+  description: "Move a range of lines to after a given line number (cut and paste). Line numbers are adjusted automatically for the removal. Throws if insertAfterLine falls inside the source range. Only works within allowed directories.",
+  inputSchema: {
+    path: z.string(),
+    start: z.number().int().min(1).describe("First line of the block to move (1-indexed, inclusive)"),
+    end: z.number().int().describe("Last line of the block to move (1-indexed, inclusive)"),
+    insertAfterLine: z.number().int().min(0).describe("Insert the block after this line number in the post-removal file. Use 0 to move to the very beginning.")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validPath = await validatePath(args.path);
+  const result = await moveLines(validPath, args.start, args.end, args.insertAfterLine);
+  const startLine = result.insertedAfter + 1;
+  const endLine   = result.insertedAfter + result.movedLines;
+  const text = `Moved ${result.movedLines} lines. Block now starts at line ${startLine}, ends at line ${endLine}. File now has ${result.total} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("copy_lines_between_files", {
+  title: "Copy Lines Between Files",
+  description: "Copy a range of lines from one file and insert the copy into a different file after a given line number. Original lines in the source are preserved. Use to combine content from two files without manually rewriting either.",
+  inputSchema: {
+    sourcePath: z.string(),
+    start: z.number().int().min(1).describe("First line of the block to copy in the source file (1-indexed, inclusive)"),
+    end: z.number().int().describe("Last line of the block to copy in the source file (1-indexed, inclusive)"),
+    destPath: z.string().describe("Destination file path. Created if it does not exist."),
+    insertAfterLine: z.number().int().min(0).describe("Insert the copied block after this line number in the destination file. Use 0 to insert at the very beginning.")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: false }
+}, async (args) => {
+  const validSource = await validatePath(args.sourcePath);
+  const validDest = await validatePath(args.destPath);
+  const result = await copyLinesBetweenFiles(validSource, args.start, args.end, validDest, args.insertAfterLine);
+  const startLine = result.insertedAfter + 1;
+  const endLine   = result.insertedAfter + result.copiedLines;
+  const text = `Copied ${result.copiedLines} lines from ${args.sourcePath} into ${args.destPath}. Inserted block starts at line ${startLine}, ends at line ${endLine}. ${args.destPath} now has ${result.destTotal} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+server.registerTool("move_lines_between_files", {
+  title: "Move Lines Between Files",
+  description: "Move (cut and paste) a range of lines from one file into a different file after a given line number. The lines are removed from the source file. Use to combine or split files without manually rewriting either.",
+  inputSchema: {
+    sourcePath: z.string(),
+    start: z.number().int().min(1).describe("First line of the block to move in the source file (1-indexed, inclusive)"),
+    end: z.number().int().describe("Last line of the block to move in the source file (1-indexed, inclusive)"),
+    destPath: z.string().describe("Destination file path. Created if it does not exist."),
+    insertAfterLine: z.number().int().min(0).describe("Insert the block after this line number in the destination file. Use 0 to insert at the very beginning.")
+  },
+  outputSchema: { content: z.string() },
+  annotations: { readOnlyHint: false, destructiveHint: true }
+}, async (args) => {
+  const validSource = await validatePath(args.sourcePath);
+  const validDest = await validatePath(args.destPath);
+  const result = await moveLinesBetweenFiles(validSource, args.start, args.end, validDest, args.insertAfterLine);
+  const startLine = result.insertedAfter + 1;
+  const endLine   = result.insertedAfter + result.movedLines;
+  const text = `Moved ${result.movedLines} lines from ${args.sourcePath} into ${args.destPath}. Inserted block starts at line ${startLine}, ends at line ${endLine}. ${args.destPath} now has ${result.destTotal} lines; ${args.sourcePath} now has ${result.sourceTotal} lines.`;
+  return { content: [{ type: "text", text }], structuredContent: { content: text } };
+});
+
+
 
 server.registerTool("append_to_file", {
   title: "Append to File",
